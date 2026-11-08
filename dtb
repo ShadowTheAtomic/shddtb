@@ -1,0 +1,621 @@
+-- Death Ball | Rayfield Hub | [K]vk
+local Rayfield = loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Workspace = game:GetService("Workspace")
+local Lighting = game:GetService("Lighting")
+local LocalPlayer = Players.LocalPlayer
+
+local Window = Rayfield:CreateWindow({
+    Name = "Death Ball | [K]vk",
+    LoadingTitle = "carregando...",
+    LoadingSubtitle = "por [K]vk",
+    ConfigurationSaving = { Enabled = false }
+})
+
+-- ========== ESTADO ==========
+local State = {
+    -- combat
+    AutoParry = false,
+    AutoAbility = false,
+    ParryDelay = 0.08,       -- base em segundos
+    PingComp = 0.05,         -- compensação de ping
+    LegitMode = true,        -- randomiza e limita taxa
+    ParryRange = 25,         -- studs
+    -- movement
+    Fly = false,
+    FlySpeed = 50,
+    InfJump = false,
+    Noclip = false,
+    Speed = 16,
+    -- farm
+    AutoFarmBoss = false,
+    FarmHeight = 60,
+    AutoReady = false,
+    -- visual
+    ESPPlayers = false,
+    ESPBall = false,
+    Fullbright = false,
+    FOV = 70,
+    -- misc
+    AntiAFK = false,
+    -- internos
+    LastParry = 0,
+    Boss = nil,
+    FlyBV = nil,
+    FlyBG = nil,
+    Hidden = false
+}
+
+-- ========== HELPERS ==========
+local function getChar()
+    return LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+end
+
+local function getHum()
+    local c = getChar()
+    return c and c:FindFirstChildOfClass("Humanoid")
+end
+
+local function getRoot()
+    local c = getChar()
+    return c and c:FindFirstChild("HumanoidRootPart")
+end
+
+local function getRemotes()
+    local ok, remotes = pcall(function()
+        return ReplicatedStorage:WaitForChild("Remotes", 10)
+    end)
+    return ok and remotes or nil
+end
+
+local function getBall()
+    -- tenta achar algo com "Ball" no nome que seja BasePart
+    for _, v in ipairs(Workspace:GetDescendants()) do
+        if v:IsA("BasePart") and v.Name:lower():find("ball") then
+            return v
+        end
+    end
+    return nil
+end
+
+local function getBoss()
+    for _, v in ipairs(Workspace:GetDescendants()) do
+        if v:IsA("Model") and (v.Name:lower():find("boss") or v.Name:lower():find("enemy")) then
+            return v
+        end
+    end
+    return nil
+end
+
+local function randomize(base, spread)
+    return base + (math.random() * spread * 2 - spread)
+end
+
+-- ========== COMBAT ==========
+local function tryParry()
+    local remotes = getRemotes()
+    if not remotes then return end
+    local parry = remotes:FindFirstChild("ParryButtonPress")
+    if not parry then return end
+    parry:Fire()
+end
+
+local function autoParryLoop()
+    task.spawn(function()
+        while State.AutoParry do
+            local root = getRoot()
+            local ball = getBall()
+            if root and ball then
+                local dist = (ball.Position - root.Position).Magnitude
+                if dist <= State.ParryRange then
+                    local now = tick()
+                    local waitTime = State.ParryDelay + State.PingComp
+                    if State.LegitMode then
+                        waitTime = randomize(waitTime, 0.06) -- ±60ms
+                    end
+                    if now - State.LastParry >= math.max(waitTime, 0.04) then
+                        tryParry()
+                        State.LastParry = now
+                    end
+                end
+            end
+            task.wait(0.01)
+        end
+    end)
+end
+
+local function autoAbilityLoop()
+    task.spawn(function()
+        while State.AutoAbility do
+            local root = getRoot()
+            local ball = getBall()
+            if root and ball then
+                local dist = (ball.Position - root.Position).Magnitude
+                if dist <= State.ParryRange * 0.7 then
+                    -- fallback: tenta disparar ability remote se existir
+                    local remotes = getRemotes()
+                    if remotes then
+                        local ability = remotes:FindFirstChild("Ability") or remotes:FindFirstChild("UseAbility")
+                        if ability then
+                            ability:FireServer()
+                        end
+                    end
+                end
+            end
+            task.wait(0.1)
+        end
+    end)
+end
+
+-- ========== MOVEMENT ==========
+local function startFly()
+    local root = getRoot()
+    local hum = getHum()
+    if not root or not hum then return end
+    if State.FlyBV then State.FlyBV:Destroy() end
+    if State.FlyBG then State.FlyBG:Destroy() end
+    State.FlyBV = Instance.new("BodyVelocity")
+    State.FlyBV.MaxForce = Vector3.new(1e5, 1e5, 1e5)
+    State.FlyBV.Velocity = Vector3.zero
+    State.FlyBV.Parent = root
+    State.FlyBG = Instance.new("BodyGyro")
+    State.FlyBG.MaxTorque = Vector3.new(1e5, 1e5, 1e5)
+    State.FlyBG.P = 1000
+    State.FlyBG.D = 50
+    State.FlyBG.CFrame = root.CFrame
+    State.FlyBG.Parent = root
+    hum.PlatformStand = true
+end
+
+local function stopFly()
+    if State.FlyBV then State.FlyBV:Destroy(); State.FlyBV = nil end
+    if State.FlyBG then State.FlyBG:Destroy(); State.FlyBG = nil end
+    local hum = getHum()
+    if hum then hum.PlatformStand = false end
+end
+
+RunService.Heartbeat:Connect(function()
+    if not State.Fly then return end
+    local root = getRoot()
+    local cam = Workspace.CurrentCamera
+    local hum = getHum()
+    if not root or not cam or not hum then return end
+    local moveDir = hum.MoveDirection
+    local vertical = 0
+    if UserInputService:IsKeyDown(Enum.KeyCode.Space) then vertical = vertical + 1 end
+    if UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) then vertical = vertical - 1 end
+    if State.FlyBV then
+        State.FlyBV.Velocity = (moveDir * State.FlySpeed) + Vector3.new(0, vertical * State.FlySpeed, 0)
+    end
+    if State.FlyBG then
+        State.FlyBG.CFrame = cam.CFrame
+    end
+end)
+
+UserInputService.JumpRequest:Connect(function()
+    if State.InfJump then
+        local hum = getHum()
+        if hum then
+            hum:ChangeState(Enum.HumanoidStateType.Jumping)
+        end
+    end
+end)
+
+RunService.Stepped:Connect(function()
+    if State.Noclip then
+        local char = getChar()
+        if char then
+            for _, p in ipairs(char:GetDescendants()) do
+                if p:IsA("BasePart") and p.CanCollide then
+                    p.CanCollide = false
+                end
+            end
+        end
+    end
+end)
+
+-- ========== FARM ==========
+local function farmBossLoop()
+    task.spawn(function()
+        while State.AutoFarmBoss do
+            local root = getRoot()
+            local boss = getBoss()
+            if root and boss then
+                local bossRoot = boss:FindFirstChild("HumanoidRootPart") or boss:FindFirstChildWhichIsA("BasePart")
+                if bossRoot then
+                    root.CFrame = CFrame.new(bossRoot.Position + Vector3.new(0, State.FarmHeight, 0))
+                    -- tenta atacar via remote de combate se existir
+                    local remotes = getRemotes()
+                    if remotes then
+                        local attack = remotes:FindFirstChild("Attack") or remotes:FindFirstChild("Swing")
+                        if attack then
+                            attack:FireServer()
+                        end
+                    end
+                end
+            end
+            task.wait(0.3)
+        end
+    end)
+end
+
+local function autoReadyLoop()
+    task.spawn(function()
+        while State.AutoReady do
+            local root = getRoot()
+            if root then
+                -- tenta achar spawn/ready zone
+                local ready = Workspace:FindFirstChild("ReadyZone") or Workspace:FindFirstChild("SpawnLocation")
+                if ready and ready:IsA("BasePart") then
+                    root.CFrame = CFrame.new(ready.Position + Vector3.new(0, 3, 0))
+                end
+            end
+            task.wait(1)
+        end
+    end)
+end
+
+-- ========== VISUAL ==========
+local function refreshESP()
+    -- jogadores
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= LocalPlayer and p.Character then
+            local hl = p.Character:FindFirstChild("DB_ESP")
+            if State.ESPPlayers then
+                if not hl then
+                    hl = Instance.new("Highlight")
+                    hl.Name = "DB_ESP"
+                    hl.FillColor = Color3.fromRGB(255, 60, 60)
+                    hl.OutlineColor = Color3.fromRGB(255, 255, 255)
+                    hl.Parent = p.Character
+                end
+            elseif hl then
+                hl:Destroy()
+            end
+        end
+    end
+    -- bola
+    local ball = getBall()
+    if ball then
+        local hl = ball:FindFirstChild("DB_BallESP")
+        if State.ESPBall then
+            if not hl then
+                hl = Instance.new("Highlight")
+                hl.Name = "DB_BallESP"
+                hl.FillColor = Color3.fromRGB(255, 220, 0)
+                hl.OutlineColor = Color3.fromRGB(255, 140, 0)
+                hl.Parent = ball
+            end
+        elseif hl then
+            hl:Destroy()
+        end
+    end
+end
+
+-- ========== MISC ==========
+local function hideUI()
+    State.Hidden = not State.Hidden
+    local gui = LocalPlayer:WaitForChild("PlayerGui")
+    local rayfieldGui = gui:FindFirstChild("Rayfield")
+    if rayfieldGui then
+        rayfieldGui.Enabled = not State.Hidden
+    end
+    if State.Hidden then
+        local hint = Instance.new("Hint")
+        hint.Name = "DB_Hint"
+        hint.Text = "[K]vk hub escondido — END para panic"
+        hint.Parent = Workspace
+        task.delay(4, function() hint:Destroy() end)
+    end
+end
+
+-- ========== PANIC ==========
+local function panic()
+    State.AutoParry = false
+    State.AutoAbility = false
+    State.AutoFarmBoss = false
+    State.AutoReady = false
+    State.Fly = false
+    State.InfJump = false
+    State.Noclip = false
+    State.ESPPlayers = false
+    State.ESPBall = false
+    stopFly()
+    refreshESP()
+    Rayfield:Notify({ Title = "Panic", Content = "tudo desligado.", Duration = 4 })
+end
+
+UserInputService.InputBegan:Connect(function(input, gpe)
+    if gpe then return end
+    if input.KeyCode == Enum.KeyCode.End then
+        panic()
+    end
+    if input.KeyCode == Enum.KeyCode.RightShift then
+        hideUI()
+    end
+end)
+
+-- ========== ABAS ==========
+local CombatTab = Window:CreateTab("Combat", 4483362458)
+local MoveTab = Window:CreateTab("Movimento", 4483362458)
+local FarmTab = Window:CreateTab("Farm", 4483362458)
+local VisualTab = Window:CreateTab("Visual", 4483362458)
+local MiscTab = Window:CreateTab("Misc", 4483362458)
+
+-- ========== COMBAT ==========
+CombatTab:CreateToggle({
+    Name = "Auto Parry (Remote)",
+    CurrentValue = false,
+    Flag = "AutoParry",
+    Callback = function(v)
+        State.AutoParry = v
+        if v then autoParryLoop() end
+    end
+})
+
+CombatTab:CreateToggle({
+    Name = "Auto Ability (failsafe)",
+    CurrentValue = false,
+    Flag = "AutoAbility",
+    Callback = function(v)
+        State.AutoAbility = v
+        if v then autoAbilityLoop() end
+    end
+})
+
+CombatTab:CreateSlider({
+    Name = "Parry Delay (s)",
+    Range = {0.02, 0.30},
+    Increment = 0.01,
+    Suffix = "s",
+    CurrentValue = 0.08,
+    Flag = "ParryDelay",
+    Callback = function(v)
+        State.ParryDelay = v
+    end
+})
+
+CombatTab:CreateSlider({
+    Name = "Ping Compensation (s)",
+    Range = {0.00, 0.20},
+    Increment = 0.01,
+    Suffix = "s",
+    CurrentValue = 0.05,
+    Flag = "PingComp",
+    Callback = function(v)
+        State.PingComp = v
+    end
+})
+
+CombatTab:CreateToggle({
+    Name = "Legit Mode (randomiza ±60ms)",
+    CurrentValue = true,
+    Flag = "LegitMode",
+    Callback = function(v)
+        State.LegitMode = v
+    end
+})
+
+CombatTab:CreateSlider({
+    Name = "Parry Range (studs)",
+    Range = {5, 40},
+    Increment = 1,
+    Suffix = " studs",
+    CurrentValue = 25,
+    Flag = "ParryRange",
+    Callback = function(v)
+        State.ParryRange = v
+    end
+})
+
+-- ========== MOVIMENTO ==========
+MoveTab:CreateSlider({
+    Name = "WalkSpeed",
+    Range = {16, 100},
+    Increment = 1,
+    Suffix = "",
+    CurrentValue = 16,
+    Flag = "Speed",
+    Callback = function(v)
+        State.Speed = v
+        local hum = getHum()
+        if hum then hum.WalkSpeed = v end
+    end
+})
+
+MoveTab:CreateToggle({
+    Name = "Fly",
+    CurrentValue = false,
+    Flag = "Fly",
+    Callback = function(v)
+        State.Fly = v
+        if v then startFly() else stopFly() end
+    end
+})
+
+MoveTab:CreateSlider({
+    Name = "Fly Speed",
+    Range = {10, 200},
+    Increment = 5,
+    Suffix = "",
+    CurrentValue = 50,
+    Flag = "FlySpeed",
+    Callback = function(v)
+        State.FlySpeed = v
+    end
+})
+
+MoveTab:CreateToggle({
+    Name = "Infinite Jump",
+    CurrentValue = false,
+    Flag = "InfJump",
+    Callback = function(v)
+        State.InfJump = v
+    end
+})
+
+MoveTab:CreateToggle({
+    Name = "Noclip",
+    CurrentValue = false,
+    Flag = "Noclip",
+    Callback = function(v)
+        State.Noclip = v
+    end
+})
+
+-- ========== FARM ==========
+FarmTab:CreateToggle({
+    Name = "Auto Farm Boss",
+    CurrentValue = false,
+    Flag = "AutoFarmBoss",
+    Callback = function(v)
+        State.AutoFarmBoss = v
+        if v then farmBossLoop() end
+    end
+})
+
+FarmTab:CreateSlider({
+    Name = "Farm Height",
+    Range = {20, 200},
+    Increment = 5,
+    Suffix = " studs",
+    CurrentValue = 60,
+    Flag = "FarmHeight",
+    Callback = function(v)
+        State.FarmHeight = v
+    end
+})
+
+FarmTab:CreateToggle({
+    Name = "Auto Ready (lobby)",
+    CurrentValue = false,
+    Flag = "AutoReady",
+    Callback = function(v)
+        State.AutoReady = v
+        if v then autoReadyLoop() end
+    end
+})
+
+-- ========== VISUAL ==========
+VisualTab:CreateToggle({
+    Name = "ESP Jogadores",
+    CurrentValue = false,
+    Flag = "ESPPlayers",
+    Callback = function(v)
+        State.ESPPlayers = v
+        refreshESP()
+    end
+})
+
+VisualTab:CreateToggle({
+    Name = "ESP Bola",
+    CurrentValue = false,
+    Flag = "ESPBall",
+    Callback = function(v)
+        State.ESPBall = v
+        refreshESP()
+    end
+})
+
+VisualTab:CreateToggle({
+    Name = "Fullbright",
+    CurrentValue = false,
+    Flag = "Fullbright",
+    Callback = function(v)
+        State.Fullbright = v
+        if v then
+            Lighting.Brightness = 3
+            Lighting.ClockTime = 12
+            Lighting.FogEnd = 1e6
+        else
+            Lighting.Brightness = 1
+            Lighting.FogEnd = 100000
+        end
+    end
+})
+
+VisualTab:CreateSlider({
+    Name = "Camera FOV",
+    Range = {30, 120},
+    Increment = 1,
+    Suffix = "",
+    CurrentValue = 70,
+    Flag = "FOV",
+    Callback = function(v)
+        State.FOV = v
+        local cam = Workspace.CurrentCamera
+        if cam then cam.FieldOfView = v end
+    end
+})
+
+-- ========== MISC ==========
+MiscTab:CreateToggle({
+    Name = "Anti-AFK",
+    CurrentValue = false,
+    Flag = "AntiAFK",
+    Callback = function(v)
+        State.AntiAFK = v
+        if v then
+            task.spawn(function()
+                while State.AntiAFK do
+                    local vu = game:GetService("VirtualUser")
+                    vu:CaptureController()
+                    vu:ClickButton2(Vector2.new())
+                    task.wait(60)
+                end
+            end)
+        end
+    end
+})
+
+MiscTab:CreateButton({
+    Name = "Server Hop",
+    Callback = function()
+        local ts = game:GetService("TeleportService")
+        local http = game:HttpGet
+        local url = ("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&limit=100"):format(game.PlaceId)
+        local ok, res = pcall(function() return http(url) end)
+        if ok and res then
+            local data = game:GetService("HttpService"):JSONDecode(res)
+            if data and data.data then
+                for _, s in ipairs(data.data) do
+                    if s.playing < s.maxPlayers then
+                        ts:TeleportToPlaceInstance(game.PlaceId, s.id, LocalPlayer)
+                        break
+                    end
+                end
+            end
+        end
+    end
+})
+
+MiscTab:CreateButton({
+    Name = "Rejoin",
+    Callback = function()
+        game:GetService("TeleportService"):Teleport(game.PlaceId, LocalPlayer)
+    end
+})
+
+MiscTab:CreateButton({
+    Name = "Hide UI (RightShift)",
+    Callback = function()
+        hideUI()
+    end
+})
+
+MiscTab:CreateButton({
+    Name = "Panic (End)",
+    Callback = function()
+        panic()
+    end
+})
+
+Rayfield:Notify({
+    Title = "Death Ball | [K]vk",
+    Content = "24 funções. END = panic. RightShift = esconder UI.",
+    Duration = 6
+})
